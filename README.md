@@ -136,7 +136,7 @@ We would like to express our gratitude to the following individuals for their su
    - *Repository*: [tribixbite/CleverKeys](https://github.com/tribixbite/CleverKeys)
 4. **Google Keyboard (Gboard) Gesture Typing**:
    - *Paper*: "Long Short Term Memory Neural Network for Keyboard Gesture Decoding" (Google Research)
-   - *Link*: [Google Research Publication PDF](https://research.google/pubs/long-short-term-memory-neural-network-for-keyboard-gesture-decoding/)
+   - *Link*: [Google Research Publication PDF](https://research.google/pubs/long-short-term-memory-neural-network-for-keyboard-gesture-recognition/)
 5. **Google Keyboard Blog**:
    - *Blog Post*: "The Machine Intelligence Behind Gboard"
    - *Link*: [Google Research Blog](https://research.google/blog/the-machine-intelligence-behind-gboard/)
