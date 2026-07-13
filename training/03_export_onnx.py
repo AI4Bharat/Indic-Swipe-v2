@@ -14,7 +14,7 @@ import onnx
 
 
 
-class CharTokenizer:
+class SequenceTokenizer:
     def __init__(self):
         self.char_to_idx = {'<pad>': 0, '<unk>': 1, '<sos>': 2, '<eos>': 3}
         for i, char in enumerate('abcdefghijklmnopqrstuvwxyz'):
@@ -22,14 +22,14 @@ class CharTokenizer:
         self.idx_to_char = {v: k for k, v in self.char_to_idx.items()}
         self.pad_idx, self.eos_idx, self.sos_idx, self.vocab_size = 0, 3, 2, 30
 
-class CharacterLevelSwipeModel(nn.Module):
+class IndicSwipeTransformer(nn.Module):
     def __init__(self, traj_dim=6, d_model=256, nhead=8, num_encoder_layers=6, 
                  num_decoder_layers=4, vocab_size=30, max_seq_len=150):
         super().__init__()
         self.d_model = d_model
 
-        self.traj_proj = nn.Linear(traj_dim, d_model // 2)
-        self.kb_embedding = nn.Embedding(vocab_size, d_model // 2)
+        self.spatial_proj = nn.Linear(traj_dim, d_model // 2)
+        self.layout_embedding = nn.Embedding(vocab_size, d_model // 2)
         self.encoder_norm = nn.LayerNorm(d_model)
         
 
@@ -41,21 +41,21 @@ class CharacterLevelSwipeModel(nn.Module):
         
 
         self.encoder = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model, nhead, 1024, 0.1, batch_first=True), num_encoder_layers)
-        self.char_embedding = nn.Embedding(vocab_size, d_model)
+        self.glyph_embedding = nn.Embedding(vocab_size, d_model)
         self.decoder = nn.TransformerDecoder(nn.TransformerDecoderLayer(d_model, nhead, 1024, 0.1, batch_first=True), num_decoder_layers)
         self.output_proj = nn.Linear(d_model, vocab_size)
 
-    def encode_trajectory(self, traj, nk, src_mask=None):
+    def process_spatial_path(self, spatial_features, key_proximity, src_mask=None):
 
-        traj_enc = self.traj_proj(traj)
-        kb_enc = self.kb_embedding(nk) 
+        traj_enc = self.spatial_proj(spatial_features)
+        kb_enc = self.layout_embedding(key_proximity) 
         
         combined = torch.cat([traj_enc, kb_enc], dim=-1)
         
 
         combined = self.encoder_norm(combined)
         
-        combined = combined + self.pe[:, :traj.shape[1], :]
+        combined = combined + self.pe[:, :spatial_features.shape[1], :]
         memory = self.encoder(combined, src_key_padding_mask=src_mask)
         return memory
 
@@ -71,8 +71,8 @@ def export():
         print(f"❌ Error: {ckpt_path} not found!")
         return
 
-    tokenizer = CharTokenizer()
-    model = CharacterLevelSwipeModel(vocab_size=tokenizer.vocab_size)
+    tokenizer = SequenceTokenizer()
+    model = IndicSwipeTransformer(vocab_size=tokenizer.vocab_size)
     
     try:
         ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
@@ -105,7 +105,7 @@ def export():
 
     class EncoderWrapper(nn.Module):
         def __init__(self, m): super().__init__(); self.m = m
-        def forward(self, traj, nk, src_mask): return self.m.encode_trajectory(traj, nk, src_mask)
+        def forward(self, spatial_features, key_proximity, src_mask): return self.m.process_spatial_path(spatial_features, key_proximity, src_mask)
 
 
     traj_ex, nk_ex, src_m_ex = torch.randn(1, 150, 6), torch.randint(0, 30, (1, 150)), torch.zeros(1, 150, dtype=torch.bool)
@@ -132,7 +132,7 @@ def export():
         def __init__(self, m): super().__init__(); self.m = m
         def forward(self, mem, tgt, src_m, tgt_m):
             t_len = 20
-            t_emb = self.m.char_embedding(tgt) * math.sqrt(self.m.d_model) + self.m.pe[:, :t_len, :]
+            t_emb = self.m.glyph_embedding(tgt) * math.sqrt(self.m.d_model) + self.m.pe[:, :t_len, :]
             causal = nn.Transformer.generate_square_subsequent_mask(t_len).to(t_emb.device)
             out = self.m.decoder(t_emb, mem, tgt_mask=causal, memory_key_padding_mask=src_m, tgt_key_padding_mask=tgt_m)
             return self.m.output_proj(out)

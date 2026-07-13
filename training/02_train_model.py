@@ -18,7 +18,7 @@ import random
 
 
 
-class KeyboardGrid:
+class LayoutGrid:
     
     
     def __init__(self, grid_path: str = "configs/keyboard_grid.json"):
@@ -55,7 +55,7 @@ class KeyboardGrid:
             self._key_coords_np.append([kx, ky])
         self._key_coords_np = np.array(self._key_coords_np)
 
-    def get_nearest_keys_vectorized(self, xs: np.ndarray, ys: np.ndarray) -> List[str]:
+    def compute_closest_keys_vectorized(self, xs: np.ndarray, ys: np.ndarray) -> List[str]:
         
 
         px = xs * self.width
@@ -67,7 +67,7 @@ class KeyboardGrid:
         nearest_indices = np.argmin(dists, axis=1)
         return [self._key_labels[i] for i in nearest_indices]
 
-    def get_nearest_key(self, x: float, y: float) -> str:
+    def compute_closest_key(self, x: float, y: float) -> str:
         
         min_dist = float('inf')
         nearest = '<unk>'
@@ -81,7 +81,7 @@ class KeyboardGrid:
         return nearest
 
 
-class CharTokenizer:
+class SequenceTokenizer:
     
     
     def __init__(self):
@@ -101,7 +101,7 @@ class CharTokenizer:
         
         self.vocab_size = len(self.vocab)
     
-    def encode_word(self, word: str) -> List[int]:
+    def text_to_indices(self, word: str) -> List[int]:
         
         indices = [self.sos_idx]
         for char in str(word).lower():
@@ -112,7 +112,7 @@ class CharTokenizer:
         indices.append(self.eos_idx)
         return indices
     
-    def decode(self, indices: List[int]) -> str:
+    def indices_to_text(self, indices: List[int]) -> str:
         
         chars = []
         for idx in indices:
@@ -130,14 +130,14 @@ class CharTokenizer:
 
 
 
-class SwipeDataset(Dataset):
+class IndicSwipeDataset(Dataset):
     
     
     def __init__(self, data_path: str, max_seq_len: int = 150, max_word_len: int = 20):
         self.max_seq_len = max_seq_len
         self.max_word_len = max_word_len
-        self.keyboard = KeyboardGrid()
-        self.tokenizer = CharTokenizer()
+        self.keyboard = LayoutGrid()
+        self.tokenizer = SequenceTokenizer()
         self.data_path = data_path
         
 
@@ -208,7 +208,7 @@ class SwipeDataset(Dataset):
         ay = np.clip(ay, -10, 10)
         
 
-        near_keys = self.keyboard.get_nearest_keys_vectorized(norm_xs, norm_ys)
+        near_keys = self.keyboard.compute_closest_keys_vectorized(norm_xs, norm_ys)
         nk_indices = [self.tokenizer.char_to_idx.get(k, self.tokenizer.unk_idx) for k in near_keys]
         
 
@@ -226,7 +226,7 @@ class SwipeDataset(Dataset):
         
 
         word = item.get('word', 'unknown')
-        target_indices = self.tokenizer.encode_word(word)
+        target_indices = self.tokenizer.text_to_indices(word)
         
 
         if len(target_indices) > self.max_word_len:
@@ -236,8 +236,8 @@ class SwipeDataset(Dataset):
             target_indices = target_indices + [self.tokenizer.pad_idx] * pad_len
         
         return {
-            'traj_features': torch.tensor(traj_features, dtype=torch.float32),
-            'nearest_keys': torch.tensor(nk_indices, dtype=torch.long),
+            'spatial_features': torch.tensor(traj_features, dtype=torch.float32),
+            'key_proximity': torch.tensor(nk_indices, dtype=torch.long),
             'target': torch.tensor(target_indices, dtype=torch.long),
             'seq_len': seq_len,
             'word': word
@@ -248,7 +248,7 @@ class SwipeDataset(Dataset):
 
 
 
-class CharacterLevelSwipeModel(nn.Module):
+class IndicSwipeTransformer(nn.Module):
     
     
     def __init__(self,
@@ -266,8 +266,8 @@ class CharacterLevelSwipeModel(nn.Module):
         self.d_model = d_model
         
 
-        self.traj_proj = nn.Linear(traj_dim, d_model // 2)
-        self.kb_embedding = nn.Embedding(vocab_size, d_model // 2)
+        self.spatial_proj = nn.Linear(traj_dim, d_model // 2)
+        self.layout_embedding = nn.Embedding(vocab_size, d_model // 2)
         self.encoder_norm = nn.LayerNorm(d_model)
         
 
@@ -290,7 +290,7 @@ class CharacterLevelSwipeModel(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
         
 
-        self.char_embedding = nn.Embedding(vocab_size, d_model)
+        self.glyph_embedding = nn.Embedding(vocab_size, d_model)
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -310,38 +310,38 @@ class CharacterLevelSwipeModel(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
     
-    def encode_trajectory(self, traj_features, nearest_keys, src_mask=None):
+    def process_spatial_path(self, spatial_features, key_proximity, src_mask=None):
         
 
-        traj_enc = self.traj_proj(traj_features)
-        kb_enc = self.kb_embedding(nearest_keys)
+        traj_enc = self.spatial_proj(spatial_features)
+        kb_enc = self.layout_embedding(key_proximity)
         
 
         combined = torch.cat([traj_enc, kb_enc], dim=-1)
         combined = self.encoder_norm(combined)
         
 
-        combined = combined + self.pe[:, :traj_features.shape[1], :]
+        combined = combined + self.pe[:, :spatial_features.shape[1], :]
         
 
         memory = self.encoder(combined, src_key_padding_mask=src_mask)
         
         return memory
     
-    def forward(self, traj_features, nearest_keys, targets, src_mask=None, tgt_mask=None):
+    def forward(self, spatial_features, key_proximity, targets, src_mask=None, tgt_mask=None):
         
 
-        memory = self.encode_trajectory(traj_features, nearest_keys, src_mask)
+        memory = self.process_spatial_path(spatial_features, key_proximity, src_mask)
         
 
         tgt_input = targets[:, :-1]  
         
 
-        tgt_emb = self.char_embedding(tgt_input) * math.sqrt(self.d_model)
+        tgt_emb = self.glyph_embedding(tgt_input) * math.sqrt(self.d_model)
         tgt_emb = tgt_emb + self.pe[:, :tgt_input.shape[1], :]
         
 
-        causal_mask = nn.Transformer.generate_square_subsequent_mask(tgt_input.shape[1]).to(traj_features.device)
+        causal_mask = nn.Transformer.generate_square_subsequent_mask(tgt_input.shape[1]).to(spatial_features.device)
         
 
         output = self.decoder(
@@ -357,12 +357,12 @@ class CharacterLevelSwipeModel(nn.Module):
         return logits
 
     @torch.no_grad()
-    def generate_beam(self, traj, nk, tokenizer, src_mask=None, beam_size=5, max_len=20):
+    def beam_search_decode(self, traj, nk, tokenizer, src_mask=None, beam_size=5, max_len=20):
         
         self.eval()
         device = traj.device
         batch_size = traj.shape[0]
-        memory = self.encode_trajectory(traj, nk, src_mask)
+        memory = self.process_spatial_path(traj, nk, src_mask)
         
         beam_seqs = torch.full((batch_size, beam_size, 1), tokenizer.sos_idx, dtype=torch.long, device=device)
         beam_scores = torch.zeros((batch_size, beam_size), device=device)
@@ -377,7 +377,7 @@ class CharacterLevelSwipeModel(nn.Module):
             flat_memory = memory.repeat_interleave(beam_size, dim=0)
             flat_src_mask = src_mask.repeat_interleave(beam_size, dim=0) if src_mask is not None else None
             
-            tgt_emb = self.char_embedding(flat_seqs) * math.sqrt(self.d_model) + self.pe[:, :step+1, :]
+            tgt_emb = self.glyph_embedding(flat_seqs) * math.sqrt(self.d_model) + self.pe[:, :step+1, :]
             causal = nn.Transformer.generate_square_subsequent_mask(step + 1).to(device).bool()
             
             out = self.decoder(tgt_emb, flat_memory, tgt_mask=causal, memory_key_padding_mask=flat_src_mask)
@@ -415,7 +415,7 @@ class CharacterLevelSwipeModel(nn.Module):
         results = []
         for b in range(batch_size):
             best_beam_idx = torch.argmax(beam_scores[b])
-            results.append(tokenizer.decode(beam_seqs[b, best_beam_idx]))
+            results.append(tokenizer.indices_to_text(beam_seqs[b, best_beam_idx]))
         return results
 
 
@@ -444,8 +444,8 @@ def train():
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
 
-    train_ds = SwipeDataset(train_path)
-    val_ds = SwipeDataset(val_path)
+    train_ds = IndicSwipeDataset(train_path)
+    val_ds = IndicSwipeDataset(val_path)
     
     loader_args = {
         'batch_size': 1024 if torch.cuda.is_available() else 32, 
@@ -460,8 +460,8 @@ def train():
     train_loader = DataLoader(train_ds, shuffle=True, **loader_args)
     val_loader = DataLoader(val_ds, **loader_args)
     
-    tokenizer = CharTokenizer()
-    model = CharacterLevelSwipeModel(vocab_size=tokenizer.vocab_size).to(device)
+    tokenizer = SequenceTokenizer()
+    model = IndicSwipeTransformer(vocab_size=tokenizer.vocab_size).to(device)
     
 
     num_epochs = 50
@@ -494,8 +494,8 @@ def train():
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
         
         for batch in pbar:
-            traj = batch['traj_features'].to(device)
-            nk = batch['nearest_keys'].to(device)
+            traj = batch['spatial_features'].to(device)
+            nk = batch['key_proximity'].to(device)
             tgt = batch['target'].to(device)
             
 
@@ -527,13 +527,13 @@ def train():
         print(f"📢 Validating Epoch {epoch+1}...")
         with torch.no_grad():
             for batch in tqdm(val_loader, desc="[Val] Beam Search"):
-                traj = batch['traj_features'].to(device)
-                nk = batch['nearest_keys'].to(device)
+                traj = batch['spatial_features'].to(device)
+                nk = batch['key_proximity'].to(device)
                 seq_lens = batch['seq_len'].to(device)
                 src_mask = torch.arange(traj.shape[1], device=device)[None, :] >= seq_lens[:, None]
                 
 
-                preds = model.generate_beam(traj, nk, tokenizer, src_mask=src_mask)
+                preds = model.beam_search_decode(traj, nk, tokenizer, src_mask=src_mask)
                 
                 for p, w in zip(preds, batch['word']):
                     total_val += 1
